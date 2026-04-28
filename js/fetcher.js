@@ -44,12 +44,20 @@ async function fetchSource(source) {
  * @param {function} onProgress — callback(done, total)
  * @returns {Promise<Article[]>}
  */
-async function fetchAllSources(sources, onProgress) {
+/**
+ * @param {Source[]} sources
+ * @param {function} onProgress   — callback(done, total)
+ * @param {function} shouldAbort  — () => bool, vérifié avant chaque lot
+ */
+async function fetchAllSources(sources, onProgress, shouldAbort) {
   const active = sources.filter(s => s.active && s.feedUrl);
-  const BATCH_SIZE = 4; // conservateur pour ne pas dépasser le rate-limit
+  const BATCH_SIZE = 4;
   const allArticles = [];
 
   for (let i = 0; i < active.length; i += BATCH_SIZE) {
+    // Si une nouvelle catégorie a été demandée, on abandonne proprement
+    if (shouldAbort && shouldAbort()) return [];
+
     const batch   = active.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(batch.map(s => fetchSource(s)));
 
@@ -59,7 +67,6 @@ async function fetchAllSources(sources, onProgress) {
 
     if (onProgress) onProgress(Math.min(i + BATCH_SIZE, active.length), active.length);
 
-    // Pause entre les lots (sauf pour le dernier)
     if (i + BATCH_SIZE < active.length) {
       await sleep(BATCH_DELAY_MS);
     }

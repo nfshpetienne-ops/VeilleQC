@@ -4,6 +4,10 @@
 
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
+// Compteur de génération : chaque nouveau fetchCategory l'incrémente.
+// L'ancien fetch vérifie s'il est toujours courant avant chaque lot.
+let _fetchGen = 0;
+
 // ── Mots vides FR + EN pour extraction de mots-clés ────────────────────────
 const STOP_WORDS = new Set([
   // FR
@@ -45,7 +49,6 @@ const App = (() => {
     showBookmarks:   false,
     searchQuery:     '',
     isRefreshing:    false,
-    fetchingCategory: null,
   };
 
   // ── Init ──────────────────────────────────────────────────────────────────
@@ -94,8 +97,8 @@ const App = (() => {
   // Ça divise par ~5 le nombre de requêtes envoyées à rss2json d'un coup.
 
   async function fetchCategory(category, silent = false) {
-    if (state.fetchingCategory) return; // une seule catégorie à la fois
-    state.fetchingCategory = category;
+    // Incrémenter la génération : tout fetch précédent s'abandonnera au prochain lot
+    const myGen = ++_fetchGen;
 
     const sources = category
       ? SOURCES.filter(s => s.active && s.feedUrl && s.category === category)
@@ -111,9 +114,14 @@ const App = (() => {
     setRefreshProgress(0, sources.length);
 
     try {
-      const fresh = await fetchAllSources(sources, (done, total) => {
-        setRefreshProgress(done, total);
-      });
+      const fresh = await fetchAllSources(
+        sources,
+        (done, total) => { if (myGen === _fetchGen) setRefreshProgress(done, total); },
+        () => myGen !== _fetchGen   // shouldAbort : une génération plus récente a démarré
+      );
+
+      // Si une autre catégorie a pris le relais, on abandonne sans toucher l'UI
+      if (myGen !== _fetchGen) return;
 
       if (fresh.length > 0) {
         await saveArticles(fresh);
@@ -127,17 +135,17 @@ const App = (() => {
         if (!silent) showToast(`${fresh.length} articles récupérés`, 'success');
       } else if (!silent) {
         document.getElementById('article-list').innerHTML = renderEmptyState('error');
-        showToast('Aucun article récupéré', 'error');
+        showToast('Aucun article récupéré — vérifie ta connexion', 'error');
       }
     } catch (err) {
+      if (myGen !== _fetchGen) return;
       console.error('[App] fetchCategory error:', err);
-      if (!silent) {
-        document.getElementById('article-list').innerHTML = renderEmptyState('error');
-      }
+      if (!silent) document.getElementById('article-list').innerHTML = renderEmptyState('error');
     } finally {
-      state.fetchingCategory = null;
-      if (btn) btn.classList.remove('loading');
-      setRefreshProgress(sources.length, sources.length);
+      if (myGen === _fetchGen) {
+        if (btn) btn.classList.remove('loading');
+        setRefreshProgress(sources.length, sources.length);
+      }
     }
   }
 
@@ -328,14 +336,17 @@ const App = (() => {
     renderArticleList();
     await renderSidebar();
 
-    // Auto-fetch si la catégorie n'a pas encore été chargée ou cache périmé
-    const hasCategoryArticles = state.articles.some(a =>
-      category === null || a.category === category
-    );
+    // Fetch si aucun article pour cette catégorie ou cache périmé.
+    // Le système de génération annule un éventuel fetch en cours proprement.
+    const hasCategoryArticles = category === null
+      ? state.articles.length > 0
+      : state.articles.some(a => a.category === category);
+
     const isStale = await isCategoryStale(category || '__all__', CACHE_TTL_MS);
 
     if (!hasCategoryArticles || isStale) {
-      fetchCategory(category, hasCategoryArticles); // silencieux si on a déjà des articles
+      // silent = true si on a déjà des articles à afficher (refresh en arrière-plan)
+      fetchCategory(category, hasCategoryArticles);
     }
   }
 
