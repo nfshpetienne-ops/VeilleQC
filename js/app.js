@@ -1,59 +1,86 @@
-// app.js — Contrôleur principal de l'application
+// app.js — Contrôleur principal
+// Stratégie de fetch : lazy par catégorie (évite le rate-limit de rss2json)
+// Chaque catégorie est fetchée à la demande et mise en cache 30 min.
 
-const REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+// ── Mots vides FR + EN pour extraction de mots-clés ────────────────────────
+const STOP_WORDS = new Set([
+  // FR
+  'le','la','les','de','du','des','un','une','et','en','que','qui','dans','sur',
+  'par','pour','avec','au','aux','ce','se','est','sont','ont','mais','ou','ne',
+  'pas','plus','très','bien','tout','tous','cette','ces','leur','leurs','être',
+  'avoir','faire','dire','quel','quelle','quels','quelles','dont','comme','plus',
+  'encore','après','avant','sous','entre','vers','selon','depuis','lors','votre',
+  'notre','vos','nos','même','aussi','peut','doit','faut','fait','lors','lors',
+  // EN
+  'the','a','an','and','or','but','in','on','at','to','for','of','with','by',
+  'from','is','are','was','were','be','been','have','has','had','do','does','did',
+  'will','would','could','should','may','might','this','that','these','those',
+  'not','no','new','more','about','how','what','when','where','who','why','its',
+  'your','their','our','can','get','set','use','now','after','before','just',
+  'also','some','than','then','into','over','here','there','which','while',
+]);
+
+function extractKeywords(title) {
+  return title
+    .toLowerCase()
+    .replace(/[^a-zàâäéèêëîïôùûüçæœ0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 3 && !STOP_WORDS.has(w))
+    .slice(0, 3);
+}
+
+// ── App ─────────────────────────────────────────────────────────────────────
 
 const App = (() => {
-  // ── État ─────────────────────────────────────────────────────────────────
-
   let state = {
-    articles:       [],       // tous les articles en mémoire
-    filtered:       [],       // articles après filtre/tri/recherche
-    activeCategory: null,
-    sortBy:         'newest',
-    viewMode:       'comfortable',
-    hideRead:       false,
-    showBookmarks:  false,
-    searchQuery:    '',
-    isRefreshing:   false,
-    lastRefresh:    null,
+    articles:        [],
+    filtered:        [],
+    blockedKeywords: [],
+    activeCategory:  null,
+    sortBy:          'newest',
+    viewMode:        'comfortable',
+    hideRead:        false,
+    showBookmarks:   false,
+    searchQuery:     '',
+    isRefreshing:    false,
+    fetchingCategory: null,
   };
 
-  // ── Init ─────────────────────────────────────────────────────────────────
+  // ── Init ──────────────────────────────────────────────────────────────────
 
   async function init() {
     await applyTheme();
     await loadPrefs();
-    renderSidebar();
-    await loadFromStorage();
 
+    // Charger le cache IndexedDB
+    state.articles        = await getAllArticles().catch(() => []);
+    state.blockedKeywords = await getBlockedKeywords().catch(() => []);
+
+    applyFilters();
+    await renderSidebar();
+    renderArticleList();
+
+    // Si aucune donnée : lancer le fetch de la première catégorie (Android)
     if (state.articles.length === 0) {
-      // Premier lancement : refresh automatique
-      await refresh();
+      await fetchCategory(getAllCategories()[0]);
     } else {
-      applyFilters();
-      renderArticleList();
-
-      // Refresh en arrière-plan si le dernier refresh date de plus de 30 min
-      const prefs = await getAllPrefs();
-      const lastRefresh = prefs.lastRefresh ? new Date(prefs.lastRefresh) : null;
-      if (!lastRefresh || (Date.now() - lastRefresh.getTime()) > REFRESH_INTERVAL_MS) {
-        refresh(true); // silencieux
+      // Refresh silencieux de la catégorie active si le cache est périmé
+      const cat = state.activeCategory || getAllCategories()[0];
+      if (await isCategoryStale(cat, CACHE_TTL_MS)) {
+        fetchCategory(cat, true);
       }
     }
 
-    // Refresh automatique toutes les 30 min
-    setInterval(() => refresh(true), REFRESH_INTERVAL_MS);
-
-    // Raccourcis clavier
     document.addEventListener('keydown', handleKeyboard);
 
-    // Recherche (debounce)
     const searchInput = document.getElementById('search-input');
     if (searchInput) {
       let debounce;
       searchInput.addEventListener('input', e => {
         clearTimeout(debounce);
-        debounce = setTimeout(() => {
+        debounce = setTimeout(async () => {
           state.searchQuery = e.target.value.trim();
           applyFilters();
           renderArticleList();
@@ -62,88 +89,89 @@ const App = (() => {
     }
   }
 
-  // ── Chargement depuis storage ─────────────────────────────────────────────
+  // ── Fetch par catégorie ───────────────────────────────────────────────────
+  // Seules les sources de la catégorie demandée sont fetchées.
+  // Ça divise par ~5 le nombre de requêtes envoyées à rss2json d'un coup.
 
-  async function loadFromStorage() {
-    try {
-      state.articles = await getAllArticles();
-    } catch {
-      state.articles = [];
-    }
-  }
+  async function fetchCategory(category, silent = false) {
+    if (state.fetchingCategory) return; // une seule catégorie à la fois
+    state.fetchingCategory = category;
 
-  // ── Refresh ───────────────────────────────────────────────────────────────
-
-  async function refresh(silent = false) {
-    if (state.isRefreshing) return;
-    state.isRefreshing = true;
+    const sources = category
+      ? SOURCES.filter(s => s.active && s.feedUrl && s.category === category)
+      : SOURCES.filter(s => s.active && s.feedUrl);
 
     const btn = document.getElementById('refresh-btn');
     if (btn) btn.classList.add('loading');
 
     if (!silent) {
-      document.getElementById('article-list').innerHTML = renderSkeletons(8);
+      document.getElementById('article-list').innerHTML = renderSkeletons(6);
     }
 
-    setRefreshProgress(0, SOURCES.length);
+    setRefreshProgress(0, sources.length);
 
     try {
-      const articles = await fetchAllSources(SOURCES, (done, total) => {
+      const fresh = await fetchAllSources(sources, (done, total) => {
         setRefreshProgress(done, total);
       });
 
-      if (articles.length > 0) {
-        await saveArticles(articles);
-        await loadFromStorage();
-
-        state.lastRefresh = new Date().toISOString();
-        await setPref('lastRefresh', state.lastRefresh);
+      if (fresh.length > 0) {
+        await saveArticles(fresh);
+        await setCategoryFetchTime(category || '__all__');
+        state.articles = await getAllArticles();
 
         applyFilters();
         renderArticleList();
-        renderSidebar();
+        await renderSidebar();
 
-        if (!silent) {
-          showToast(`${articles.length} articles récupérés`, 'success');
-        }
+        if (!silent) showToast(`${fresh.length} articles récupérés`, 'success');
       } else if (!silent) {
-        showToast('Aucun article récupéré — vérifiez votre connexion', 'error');
         document.getElementById('article-list').innerHTML = renderEmptyState('error');
+        showToast('Aucun article récupéré', 'error');
       }
     } catch (err) {
-      console.error('[App] Erreur refresh:', err);
+      console.error('[App] fetchCategory error:', err);
       if (!silent) {
-        showToast('Erreur lors du rafraîchissement', 'error');
         document.getElementById('article-list').innerHTML = renderEmptyState('error');
       }
     } finally {
-      state.isRefreshing = false;
+      state.fetchingCategory = null;
       if (btn) btn.classList.remove('loading');
-      setRefreshProgress(SOURCES.length, SOURCES.length);
+      setRefreshProgress(sources.length, sources.length);
     }
   }
 
-  // ── Filtres et tri ────────────────────────────────────────────────────────
+  // Bouton "Rafraîchir" : refresh la catégorie active uniquement
+  async function refresh() {
+    const cat = state.activeCategory;
+    await fetchCategory(cat, false);
+  }
+
+  // ── Filtres ───────────────────────────────────────────────────────────────
 
   function applyFilters() {
     let articles = [...state.articles];
 
-    // Filtre catégorie
+    // Filtre mots-clés bloqués
+    if (state.blockedKeywords.length > 0) {
+      articles = articles.filter(a => {
+        const title = a.title.toLowerCase();
+        return !state.blockedKeywords.some(kw => title.includes(kw));
+      });
+    }
+
     if (state.activeCategory) {
       articles = articles.filter(a => a.category === state.activeCategory);
     }
 
-    // Masquer lus
     if (state.hideRead) {
       articles = articles.filter(a => !a.isRead);
     }
 
-    // Bookmarks uniquement
     if (state.showBookmarks) {
       articles = articles.filter(a => a.isBookmarked);
     }
 
-    // Recherche
     if (state.searchQuery) {
       const q = state.searchQuery.toLowerCase();
       articles = articles.filter(a =>
@@ -153,23 +181,18 @@ const App = (() => {
       );
     }
 
-    // Tri
     articles.sort((a, b) => {
       switch (state.sortBy) {
-        case 'oldest':
-          return new Date(a.publishedAt) - new Date(b.publishedAt);
-        case 'source':
-          return a.sourceName.localeCompare(b.sourceName, 'fr');
-        case 'newest':
-        default:
-          return new Date(b.publishedAt) - new Date(a.publishedAt);
+        case 'oldest': return new Date(a.publishedAt) - new Date(b.publishedAt);
+        case 'source': return a.sourceName.localeCompare(b.sourceName, 'fr');
+        default:       return new Date(b.publishedAt) - new Date(a.publishedAt);
       }
     });
 
     state.filtered = articles;
   }
 
-  // ── Rendu articles ────────────────────────────────────────────────────────
+  // ── Rendu ─────────────────────────────────────────────────────────────────
 
   function renderArticleList() {
     const list = document.getElementById('article-list');
@@ -177,8 +200,8 @@ const App = (() => {
 
     if (state.filtered.length === 0) {
       const type = state.articles.length === 0 ? 'empty'
-                 : (state.searchQuery || state.activeCategory) ? 'no_results'
-                 : 'empty';
+                 : (state.searchQuery || state.activeCategory || state.blockedKeywords.length > 0)
+                   ? 'no_results' : 'empty';
       list.innerHTML = renderEmptyState(type);
       return;
     }
@@ -187,89 +210,140 @@ const App = (() => {
       .map(a => renderArticleCard(a, state.searchQuery))
       .join('');
 
-    // Attacher les click handlers
     list.querySelectorAll('.article-card').forEach(card => {
-      card.addEventListener('click', () => {
-        const id  = card.dataset.id;
-        const url = card.dataset.url;
-        openArticle(id, url);
-      });
+      card.addEventListener('click', () => openArticle(card.dataset.id, card.dataset.url));
     });
   }
-
-  // ── Sidebar ───────────────────────────────────────────────────────────────
 
   async function renderSidebar() {
     const container = document.getElementById('sidebar-categories');
     if (!container) return;
 
-    // Calcul des compteurs non-lus par catégorie
     const unreadCounts = {};
     for (const cat of getAllCategories()) {
       unreadCounts[cat] = state.articles.filter(
-        a => a.category === cat && !a.isRead
+        a => a.category === cat && !a.isRead &&
+             !state.blockedKeywords.some(kw => a.title.toLowerCase().includes(kw))
       ).length;
     }
 
     container.innerHTML = renderSidebarCategories(
-      getAllCategories(),
-      state.activeCategory,
-      unreadCounts
+      getAllCategories(), state.activeCategory, unreadCounts
     );
 
-    // Stats
+    // Compteur global
     const statsEl = document.getElementById('sidebar-stats');
     if (statsEl) {
-      const total  = state.articles.length;
-      const unread = state.articles.filter(a => !a.isRead).length;
-      statsEl.textContent = `${total} articles · ${unread} non lus`;
+      const unread = Object.values(unreadCounts).reduce((a, b) => a + b, 0);
+      statsEl.textContent = `${state.filtered.length || state.articles.length} articles · ${unread} non lus`;
     }
 
-    // Dernière mise à jour
-    const refreshEl = document.getElementById('last-refresh');
-    if (refreshEl && state.lastRefresh) {
-      refreshEl.textContent = `Màj ${relativeTime(state.lastRefresh)}`;
-    }
+    // Mots-clés bloqués
+    renderBlockedKeywords();
   }
 
-  // ── Actions utilisateur ───────────────────────────────────────────────────
+  function renderBlockedKeywords() {
+    const container = document.getElementById('blocked-keywords-section');
+    if (!container) return;
+
+    if (state.blockedKeywords.length === 0) {
+      container.innerHTML = '';
+      return;
+    }
+
+    container.innerHTML = `
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-section">
+        <div class="sidebar-section-title" style="display:flex;align-items:center;justify-content:space-between">
+          Sujets filtrés
+          <button onclick="App.clearAllBlockedKeywords()"
+                  style="font-size:.65rem;color:var(--text-tertiary);cursor:pointer;text-transform:none;letter-spacing:0"
+                  title="Tout supprimer">Effacer tout</button>
+        </div>
+        <div style="padding:4px 16px 8px;display:flex;flex-wrap:wrap;gap:5px">
+          ${state.blockedKeywords.map(kw => `
+            <span class="blocked-kw-chip" title="Cliquer pour débloquer"
+                  onclick="App.unblockKeyword('${esc(kw)}')">
+              ${esc(kw)} ×
+            </span>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  // ── Actions ───────────────────────────────────────────────────────────────
 
   async function openArticle(id, url) {
-    // Marquer comme lu
     await markAsRead(id);
-    const article = state.articles.find(a => a.id === id);
-    if (article) {
-      article.isRead = true;
-      applyFilters();
-      renderArticleList();
-      renderSidebar();
-    }
+    const a = state.articles.find(a => a.id === id);
+    if (a) { a.isRead = true; applyFilters(); renderArticleList(); await renderSidebar(); }
     window.open(url, '_blank', 'noopener');
   }
 
   async function toggleBookmark(id) {
-    const isNow = await toggleBookmarkStorage(id);
-    const article = state.articles.find(a => a.id === id);
-    if (article) {
-      article.isBookmarked = isNow;
-      applyFilters();
-      renderArticleList();
-    }
-    showToast(isNow ? '★ Article sauvegardé' : 'Signet retiré', 'info', 2000);
+    const isNow = await toggleBookmark_storage(id);
+    const a = state.articles.find(a => a.id === id);
+    if (a) { a.isBookmarked = isNow; applyFilters(); renderArticleList(); }
+    showToast(isNow ? '★ Sauvegardé' : 'Signet retiré', 'info', 2000);
   }
 
-  function setCategory(category) {
+  // ── Pertinence ────────────────────────────────────────────────────────────
+
+  async function notInterested(id, title) {
+    const keywords = extractKeywords(title);
+    if (keywords.length === 0) {
+      showToast('Pas de mot-clé pertinent trouvé', 'info', 2000);
+      return;
+    }
+
+    state.blockedKeywords = await addBlockedKeywords(keywords);
+    applyFilters();
+    renderArticleList();
+    await renderSidebar();
+
+    showToast(`🚫 Sujets bloqués : ${keywords.join(', ')}`, 'info', 4000);
+  }
+
+  async function unblockKeyword(word) {
+    state.blockedKeywords = await removeBlockedKeyword(word);
+    applyFilters();
+    renderArticleList();
+    await renderSidebar();
+    showToast(`✓ "${word}" débloqué`, 'success', 2000);
+  }
+
+  async function clearAllBlockedKeywords() {
+    await clearBlockedKeywords();
+    state.blockedKeywords = [];
+    applyFilters();
+    renderArticleList();
+    await renderSidebar();
+    showToast('Tous les filtres de sujets supprimés', 'success', 2000);
+  }
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+
+  async function setCategory(category) {
     state.activeCategory = category;
     applyFilters();
     renderArticleList();
-    renderSidebar();
+    await renderSidebar();
+
+    // Auto-fetch si la catégorie n'a pas encore été chargée ou cache périmé
+    const hasCategoryArticles = state.articles.some(a =>
+      category === null || a.category === category
+    );
+    const isStale = await isCategoryStale(category || '__all__', CACHE_TTL_MS);
+
+    if (!hasCategoryArticles || isStale) {
+      fetchCategory(category, hasCategoryArticles); // silencieux si on a déjà des articles
+    }
   }
 
   function clearFilters() {
     state.activeCategory = null;
-    state.hideRead = false;
-    state.showBookmarks = false;
-    state.searchQuery = '';
+    state.hideRead       = false;
+    state.showBookmarks  = false;
+    state.searchQuery    = '';
     const searchInput = document.getElementById('search-input');
     if (searchInput) searchInput.value = '';
     applyFilters();
@@ -280,12 +354,14 @@ const App = (() => {
 
   function setSortBy(sort) {
     state.sortBy = sort;
+    setPref('sortBy', sort);
     applyFilters();
     renderArticleList();
   }
 
   function toggleHideRead() {
     state.hideRead = !state.hideRead;
+    setPref('hideRead', state.hideRead);
     applyFilters();
     renderArticleList();
     updateToolbar();
@@ -307,9 +383,8 @@ const App = (() => {
 
   function updateToolbar() {
     document.querySelectorAll('.filter-chip').forEach(chip => {
-      const filter = chip.dataset.filter;
-      if (filter === 'hideRead')  chip.classList.toggle('active', state.hideRead);
-      if (filter === 'bookmarks') chip.classList.toggle('active', state.showBookmarks);
+      if (chip.dataset.filter === 'hideRead')  chip.classList.toggle('active', state.hideRead);
+      if (chip.dataset.filter === 'bookmarks') chip.classList.toggle('active', state.showBookmarks);
     });
     document.querySelectorAll('.view-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.view === state.viewMode);
@@ -328,7 +403,7 @@ const App = (() => {
 
   async function toggleTheme() {
     const current = document.documentElement.getAttribute('data-theme');
-    const next = current === 'dark' ? 'light' : 'dark';
+    const next    = current === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
     await setPref('theme', next);
     const btn = document.getElementById('theme-btn');
@@ -338,11 +413,10 @@ const App = (() => {
   // ── Prefs ─────────────────────────────────────────────────────────────────
 
   async function loadPrefs() {
-    const prefs = await getAllPrefs();
+    const prefs = await getAllPrefs().catch(() => ({}));
     state.sortBy   = prefs.sortBy   || 'newest';
     state.viewMode = prefs.viewMode || 'comfortable';
     state.hideRead = prefs.hideRead || false;
-    state.lastRefresh = prefs.lastRefresh;
 
     document.body.classList.toggle('view-compact', state.viewMode === 'compact');
 
@@ -353,26 +427,12 @@ const App = (() => {
   // ── Raccourcis clavier ────────────────────────────────────────────────────
 
   function handleKeyboard(e) {
-    // Ignorer si focus dans un input
     if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
-
     switch (e.key) {
-      case 'r':
-      case 'R':
-        refresh();
-        break;
-      case 't':
-      case 'T':
-        toggleTheme();
-        break;
-      case '/':
-        e.preventDefault();
-        document.getElementById('search-input')?.focus();
-        break;
-      case 'Escape':
-        document.getElementById('search-input')?.blur();
-        clearFilters();
-        break;
+      case 'r': case 'R': refresh(); break;
+      case 't': case 'T': toggleTheme(); break;
+      case '/': e.preventDefault(); document.getElementById('search-input')?.focus(); break;
+      case 'Escape': document.getElementById('search-input')?.blur(); clearFilters(); break;
       case '1': setCategory(getAllCategories()[0]); break;
       case '2': setCategory(getAllCategories()[1]); break;
       case '3': setCategory(getAllCategories()[2]); break;
@@ -385,48 +445,32 @@ const App = (() => {
   // ── Sidebar mobile ────────────────────────────────────────────────────────
 
   function toggleSidebar() {
-    const sidebar  = document.getElementById('sidebar');
-    const overlay  = document.getElementById('sidebar-overlay');
-    const isOpen   = sidebar.classList.contains('open');
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    const isOpen  = sidebar.classList.contains('open');
     sidebar.classList.toggle('open', !isOpen);
     overlay.classList.toggle('show', !isOpen);
   }
 
-  // ── Icons SVG inline ──────────────────────────────────────────────────────
+  // ── SVG icons ─────────────────────────────────────────────────────────────
 
   function iconMoon() {
-    return `<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-      <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
-    </svg>`;
+    return `<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>`;
   }
-
   function iconSun() {
-    return `<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-      <circle cx="12" cy="12" r="5"/>
-      <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
-      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-      <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
-      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-    </svg>`;
+    return `<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`;
   }
 
   // ── API publique ──────────────────────────────────────────────────────────
   return {
-    init,
-    refresh,
-    setCategory,
-    clearFilters,
-    setSortBy,
-    toggleHideRead,
-    toggleBookmarksOnly,
-    toggleBookmark,
-    toggleTheme,
-    toggleSidebar,
-    setViewMode,
+    init, refresh, setCategory, clearFilters,
+    setSortBy, toggleHideRead, toggleBookmarksOnly,
+    toggleBookmark, toggleTheme, toggleSidebar, setViewMode,
+    notInterested, unblockKeyword, clearAllBlockedKeywords,
   };
 })();
 
-// Alias storage pour ne pas shadower
-async function toggleBookmarkStorage(id) { return toggleBookmark(id); }
+// Alias pour éviter le conflit de nom avec storage.js
+async function toggleBookmark_storage(id) { return toggleBookmark(id); }
 
 document.addEventListener('DOMContentLoaded', () => App.init());

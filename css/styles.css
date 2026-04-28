@@ -618,6 +618,32 @@ mark {
   padding: 0 1px;
 }
 
+/* ── Bouton Pas intéressé ────────────────────────────────────────────────── */
+.not-interested-btn {
+  color: var(--text-tertiary) !important;
+}
+.not-interested-btn:hover {
+  color: #f87171 !important;
+  border-color: #f87171 !important;
+  background: rgba(248,113,113,.1) !important;
+}
+
+/* ── Chips mots-clés bloqués ─────────────────────────────────────────────── */
+.blocked-kw-chip {
+  display: inline-flex; align-items: center;
+  font-size: .7rem; font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: rgba(248,113,113,.12);
+  color: #f87171;
+  border: 1px solid rgba(248,113,113,.3);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.blocked-kw-chip:hover {
+  background: rgba(248,113,113,.25);
+}
+
 /* ── Stats bar (footer sidebar) ─────────────────────────────────────────── */
 .sidebar-stats {
   margin-top: auto;
