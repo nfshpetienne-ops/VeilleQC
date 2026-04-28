@@ -504,7 +504,7 @@ body.view-compact .article-thumbnail { display: none; }
 .article-actions {
   display: flex; gap: 4px;
   position: absolute; right: 12px; top: 12px;
-  opacity: 0; transition: opacity var(--transition);
+  opacity: .3; transition: opacity var(--transition);
 }
 
 .article-card:hover .article-actions { opacity: 1; }
