@@ -114,7 +114,7 @@ const SOURCES = [
     category: CATEGORIES.ANDROID,
     subCategory: 'Média FR',
     language: 'fr',
-    active: true,
+    active: false, // trop orienté consommateur / deals
   },
   {
     id: 'phonandroid',

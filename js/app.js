@@ -4,12 +4,23 @@
 
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
-// Mots-clés hors-sujet filtrés par défaut au premier chargement
-const DEFAULT_BLOCKED_KEYWORDS = [
-  'deal', 'deals', 'promo', 'offre', 'solde', 'remise', 'rabais',
-  'bon plan', 'black friday', 'prime day',
-  'voiture', 'vehicle', 'automobile', 'tesla', 'carplay',
-  'unboxing', 'giveaway', 'concours',
+// ── Filtre de bruit permanent ─────────────────────────────────────────────
+// Ces termes sont TOUJOURS exclus, indépendamment des préférences utilisateur.
+// Ils ne sont pas modifiables via l'UI et survivent à tout rechargement.
+const HARD_NOISE_TERMS = [
+  // Deals & promos EN
+  'deal', 'deals', 'discount', 'on sale', 'black friday', 'prime day',
+  'cyber monday', 'giveaway', 'save up to', 'best price',
+  // Deals & promos FR
+  'bon plan', 'bonne affaire', 'solde', 'offre spéciale', 'prix cassé',
+  'meilleur prix', 'promotion', 'promo',
+  // Achat / consommateur
+  'unboxing', 'concours', 'faut-il acheter', 'vaut-il le coup',
+  'meilleur smartphone', 'comparatif', 'quel téléphone',
+  // Voitures
+  'carplay', 'android auto', 'android automotive', 'voiture connectée',
+  // Divertissement hors-sujet
+  'jeu vidéo', 'gaming', 'film', 'série netflix', 'streaming',
 ];
 
 // Compteur de génération : chaque nouveau fetchCategory l'incrémente.
@@ -68,13 +79,6 @@ const App = (() => {
     // Charger le cache IndexedDB
     state.articles        = await getAllArticles().catch(() => []);
     state.blockedKeywords = await getBlockedKeywords().catch(() => []);
-
-    // Seeder les mots-clés hors-sujet par défaut au premier lancement
-    const seeded = await getPref('defaultKeywordsSeeded').catch(() => false);
-    if (!seeded) {
-      state.blockedKeywords = await addBlockedKeywords(DEFAULT_BLOCKED_KEYWORDS);
-      await setPref('defaultKeywordsSeeded', true);
-    }
 
     applyFilters();
     await renderSidebar();
@@ -175,7 +179,13 @@ const App = (() => {
   function applyFilters() {
     let articles = [...state.articles];
 
-    // Filtre mots-clés bloqués
+    // Filtre de bruit permanent (hard-coded, non modifiable)
+    articles = articles.filter(a => {
+      const title = a.title.toLowerCase();
+      return !HARD_NOISE_TERMS.some(term => title.includes(term));
+    });
+
+    // Filtre mots-clés bloqués par l'utilisateur
     if (state.blockedKeywords.length > 0) {
       articles = articles.filter(a => {
         const title = a.title.toLowerCase();
