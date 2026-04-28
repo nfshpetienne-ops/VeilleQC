@@ -4,6 +4,14 @@
 
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
+// Mots-clés hors-sujet filtrés par défaut au premier chargement
+const DEFAULT_BLOCKED_KEYWORDS = [
+  'deal', 'deals', 'promo', 'offre', 'solde', 'remise', 'rabais',
+  'bon plan', 'black friday', 'prime day',
+  'voiture', 'vehicle', 'automobile', 'tesla', 'carplay',
+  'unboxing', 'giveaway', 'concours',
+];
+
 // Compteur de génération : chaque nouveau fetchCategory l'incrémente.
 // L'ancien fetch vérifie s'il est toujours courant avant chaque lot.
 let _fetchGen = 0;
@@ -60,6 +68,13 @@ const App = (() => {
     // Charger le cache IndexedDB
     state.articles        = await getAllArticles().catch(() => []);
     state.blockedKeywords = await getBlockedKeywords().catch(() => []);
+
+    // Seeder les mots-clés hors-sujet par défaut au premier lancement
+    const seeded = await getPref('defaultKeywordsSeeded').catch(() => false);
+    if (!seeded) {
+      state.blockedKeywords = await addBlockedKeywords(DEFAULT_BLOCKED_KEYWORDS);
+      await setPref('defaultKeywordsSeeded', true);
+    }
 
     applyFilters();
     await renderSidebar();

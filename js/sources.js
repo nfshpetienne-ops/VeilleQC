@@ -82,7 +82,7 @@ const SOURCES = [
     category: CATEGORIES.ANDROID,
     subCategory: 'Média EN',
     language: 'en',
-    active: true,
+    active: false, // section deals trop volumineuse
   },
   {
     id: 'xda-developers',
@@ -102,7 +102,7 @@ const SOURCES = [
     category: CATEGORIES.ANDROID,
     subCategory: 'Média EN',
     language: 'en',
-    active: true,
+    active: false, // reviews matériel, voitures, hors sujet pro
   },
 
   // ── ANDROID — Médias francophones ─────────────────────────────────────────
@@ -124,7 +124,7 @@ const SOURCES = [
     category: CATEGORIES.ANDROID,
     subCategory: 'Média FR',
     language: 'fr',
-    active: true,
+    active: false, // trop de deals / promo consommateur
   },
   {
     id: 'journal-du-geek',
@@ -134,7 +134,7 @@ const SOURCES = [
     category: CATEGORIES.ANDROID,
     subCategory: 'Média FR',
     language: 'fr',
-    active: true,
+    active: false, // trop généraliste (entertainment, voitures, promos)
   },
 
   // ── iOS — Sources officielles ──────────────────────────────────────────────
@@ -198,7 +198,7 @@ const SOURCES = [
     category: CATEGORIES.IOS,
     subCategory: 'Média EN',
     language: 'en',
-    active: true,
+    active: false, // orienté consommateur, deals, accessoires
   },
   {
     id: 'six-colors',
@@ -250,7 +250,7 @@ const SOURCES = [
     category: CATEGORIES.IOS,
     subCategory: 'Média FR',
     language: 'fr',
-    active: true,
+    active: false, // site de deals Apple, presque uniquement promos
   },
 
   // ── QA / QC MOBILE ────────────────────────────────────────────────────────
